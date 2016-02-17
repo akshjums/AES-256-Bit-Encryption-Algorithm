@@ -1,0 +1,118 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.STD_LOGIC_UNSIGNED.ALL;
+
+entity UARTTranceiver is
+    Port ( clk : in  STD_LOGIC;
+           reset : in  STD_LOGIC;
+           start : in  STD_LOGIC;
+			  dataParallelIn : in STD_LOGIC_VECTOR(7 downto 0);
+           dataSerialOut : out  STD_LOGIC;
+			  dataSerialIn : in  STD_LOGIC;
+			  dataParallelOut: out STD_LOGIC_VECTOR(7 downto 0);
+			  sentFlag: out  STD_LOGIC;
+			  receiveFlag: out  STD_LOGIC;
+			  sentAck: in  STD_LOGIC;
+			  receiveAck: in  STD_LOGIC);
+end UARTTranceiver;
+
+architecture Behavioral of UARTTranceiver is
+signal dataOutBuf,dataInBuf: std_logic_vector(7 downto 0);
+signal counter,counter2: std_logic_vector(15 downto 0);
+signal bitsSent,bitsReceived: std_logic_vector(3 downto 0);
+signal serialBufOut: std_logic;
+type State is (state_Idle, state_Prepare, state_Transaction, state_Finish);
+signal cStateSend,cStateReceive: State;
+
+begin
+
+T: process(clk,reset)
+begin
+	if(reset='1') then
+		dataOutBuf<=(others=>'0');
+		dataInBuf<=(others=>'0');
+		serialBufOut<='1';
+		counter<=(others=>'0');
+		counter2<=(others=>'0');
+		bitsSent<="0000";
+		bitsReceived<="0000";
+		cStateSend<=state_Idle;
+		cStateReceive<=state_Idle;
+	elsif(clk'event and clk='1') then
+		----------------Transmit
+		if(cStateSend=state_Idle) then
+			if(start='1') then
+				serialBufOut<='0';
+				cStateSend<=state_Transaction;
+				dataOutBuf<=dataParallelIn;
+				counter<=(others=>'0');
+				bitsSent<="0000";
+			end if;
+		elsif(cStateSend=state_Transaction) then
+			counter<=counter+'1';
+			if(counter=X"28B0") then	--0364 : 115200, 28B0: 9600
+				counter<=(others=>'0');
+				bitsSent<=bitsSent+'1';
+				if(bitsSent="1001") then
+					serialBufOut<='1';
+					bitsSent<=(others=>'0');
+					cStateSend<=state_Finish;
+				elsif(bitsSent="1000") then
+					serialBufOut<='1';
+				else
+					serialBufOut<=dataOutBuf(0);
+				end if;
+				dataOutBuf<='0'&dataOutBuf(7 downto 1);
+			end if;
+		elsif(cStateSend=state_Finish) then
+			if(sentAck='1') then
+				cStateSend<=state_Idle;
+			end if;
+			
+		end if;
+		----------------Receive
+		if(cStateReceive=state_Idle) then
+			if(dataSerialIn='0') then
+				cStateReceive<=state_Prepare;
+				dataInBuf<=(others=>'0');
+				counter2<=(others=>'0');
+				bitsReceived<="0000";
+			end if;
+		elsif(cStateReceive=state_Prepare) then
+			counter2<=counter2+'1';
+			if(counter2=10#200#) then
+				counter2<=(others=>'0');
+				cStateReceive<=state_Transaction;
+			end if;
+		elsif(cStateReceive=state_Transaction) then
+			counter2<=counter2+'1';
+			if(counter2=X"28B0") then	--0364 : 115200, 28B0: 9600
+				counter2<=(others=>'0');
+				bitsReceived<=bitsReceived+'1';
+				if(bitsReceived="1000") then
+					bitsReceived<=(others=>'0');
+					
+					cStateReceive<=state_Finish;
+				else
+					dataInBuf<=dataSerialIn&dataInBuf(7 downto 1);
+				end if;
+				
+			end if;
+		elsif(cStateReceive=state_Finish) then
+			if(dataSerialIn='1' and receiveAck='1') then
+				cStateReceive<=state_Idle;
+			end if;
+			
+		end if;		
+		
+	end if;
+end process;
+sentFlag<='1' when cStateSend=state_Finish else '0';
+receiveFlag<='1' when cStateReceive=state_Finish else '0';
+
+dataSerialOut<=serialBufOut;
+
+dataParallelOut<=dataInBuf;
+
+end Behavioral;
+
