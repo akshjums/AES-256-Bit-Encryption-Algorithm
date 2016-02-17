@@ -1,0 +1,63 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.STD_LOGIC_UNSIGNED.ALL;
+
+entity SevenSegManager is
+    Port ( clk : in  STD_LOGIC;
+           reset : in  STD_LOGIC;
+           dig0 : in  STD_LOGIC_VECTOR (3 downto 0);
+           dig1 : in  STD_LOGIC_VECTOR (3 downto 0);
+           dig2 : in  STD_LOGIC_VECTOR (3 downto 0);
+           dig3 : in  STD_LOGIC_VECTOR (3 downto 0);
+           sevSeg : out  STD_LOGIC_VECTOR (6 downto 0);
+           anodeOut : out  STD_LOGIC_VECTOR (3 downto 0));
+end SevenSegManager;
+
+architecture Behavioral of SevenSegManager is
+signal segIn: STD_LOGIC_VECTOR (3 downto 0);
+signal count: STD_LOGIC_VECTOR (1 downto 0);
+signal countDelay: STD_LOGIC_VECTOR (15 downto 0);
+begin
+
+	S: process(reset,clk)
+	begin
+		if(reset='1') then
+			count<="00";
+			countDelay<=(others=>'0');
+		elsif(clk'event and clk='1') then
+			countDelay<=countDelay+'1';
+			if(countDelay=X"FFFF") then
+				count<=count+'1';
+			end if;
+		end if;
+	end process;
+
+	anodeOut<="0111" when count="00" else
+				 "1011" when count="01" else
+				 "1101" when count="10" else
+				 "1110";
+	segIn<=	 dig0 when count="00" else
+				 dig1 when count="01" else
+				 dig2 when count="10" else
+				 dig3;
+
+	with segIn select
+		sevSeg<= "1000000" when X"0",
+					"1111001" when X"1",
+					"0100100" when X"2",
+					"0110000" when X"3",
+					"0011001" when X"4",
+					"0010010" when X"5",
+					"0000010" when X"6",
+					"1111000" when X"7",
+					"0000000" when X"8",
+					"0010000" when X"9",
+					"0001000" when X"A",
+					"0000011" when X"B",
+					"1000110" when X"C",
+					"0100001" when X"D",
+					"0000110" when X"E",
+					"0001110" when OTHERS;
+
+end Behavioral;
+
