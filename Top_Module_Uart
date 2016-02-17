@@ -1,0 +1,327 @@
+library IEEE;
+use IEEE.STD_LOGIC_1164.ALL;
+use IEEE.STD_LOGIC_UNSIGNED.ALL;
+use WORK.rijndael_pack.all;
+
+entity AESFinalDemo is
+    Port ( clk : in  STD_LOGIC;
+           reset : in  STD_LOGIC;
+           serialDataIn : in  STD_LOGIC;
+           serialDataOut : out  STD_LOGIC;
+           getData : in  STD_LOGIC;
+			  sw1     : in STD_LOGIC;
+			  sw2     : in STD_LOGIC;
+			  b1: in std_logic;
+			  b2: in std_logic;
+			  b3: in std_logic;
+			  btn: in std_logic;
+			  leds: out std_logic_vector(3 downto 0);
+			  led2_4: out STD_LOGIC_VECTOR(2 downto 0);
+			  led_7: out STD_LOGIC;
+			  anodeOut: out STD_LOGIC_VECTOR(3 downto 0);
+			  sevSeg: out STD_LOGIC_VECTOR(6 downto 0);
+			  SW: in STD_LOGIC_VECTOR(4 downto 0));
+end AESFinalDemo;
+
+architecture Behavioral of AESFinalDemo is
+
+component RIJNDAEL_TOP_ITER is
+
+  port (clock     : in std_logic;
+        reset     : in std_logic;
+
+        ENC_DEC_B : in std_logic;  -- '1' = encrypt, '0' = decrypt
+        DATA_IN   : in SLV_128;    -- 128-bit input data word (plaintext)
+        DATA_LOAD : in std_logic;  -- data valid; load new input data word
+        CV_IN     : in SLV_256;    -- 128, 192, 256-bit cv (user supplied key)
+        --CV_LOAD   : in std_logic;  -- cv_in is valid; load new cryptovariable
+        
+      b1   : in std_logic;
+      b2   : in std_logic;
+      b3   : in std_logic;
+      leds : out std_logic_vector(2 downto 0);		 
+		 --CV_SIZE   : in SLV_2;      -- '00'= 128, '01'= 192, '10'= 256
+
+        DATA_OUT  : out SLV_128;   -- 128-bit output data word (ciphertext)
+        DONE      : out std_logic  -- indicates 'data_out' is valid
+);
+  end component;
+component UARTTranceiver is
+    Port ( clk : in  STD_LOGIC;
+           reset : in  STD_LOGIC;
+           start : in  STD_LOGIC;
+			  dataParallelIn : in STD_LOGIC_VECTOR(7 downto 0);
+           dataSerialOut : out  STD_LOGIC;
+			  dataSerialIn : in  STD_LOGIC;
+			  dataParallelOut: out STD_LOGIC_VECTOR(7 downto 0);
+			  sentFlag: out  STD_LOGIC;
+			  receiveFlag: out  STD_LOGIC;
+			  sentAck: in  STD_LOGIC;
+			  receiveAck: in  STD_LOGIC);
+end component;
+component SevenSegManager is
+    Port ( clk : in  STD_LOGIC;
+           reset : in  STD_LOGIC;
+           dig0 : in  STD_LOGIC_VECTOR (3 downto 0);
+           dig1 : in  STD_LOGIC_VECTOR (3 downto 0);
+           dig2 : in  STD_LOGIC_VECTOR (3 downto 0);
+           dig3 : in  STD_LOGIC_VECTOR (3 downto 0);
+           sevSeg : out  STD_LOGIC_VECTOR (6 downto 0);
+           anodeOut : out  STD_LOGIC_VECTOR (3 downto 0));
+end component;
+component DCM
+port
+ (-- Clock in ports
+  CLK_IN1           : in     std_logic;
+  -- Clock out ports
+  CLK_OUT1          : out    std_logic;
+  -- Status and control signals
+  RESET             : in     std_logic;
+  LOCKED            : out    std_logic
+ );
+end component;
+component ICON
+  PORT (
+    CONTROL0 : INOUT STD_LOGIC_VECTOR(35 DOWNTO 0));
+
+end component;
+
+component chipscope_ILA
+  PORT (
+    CONTROL : INOUT STD_LOGIC_VECTOR(35 DOWNTO 0);
+    CLK : IN STD_LOGIC;
+    TRIG0 : IN STD_LOGIC_VECTOR(14 DOWNTO 0));
+
+end component;
+
+
+signal dataStreamTo7Seg:std_logic_vector(15 downto 0);
+
+
+type State is (state_check, state_StartRx, state_RxData, state_waitforaes, state_operation, 
+					state_AES_Running, state_TxReady, state_StartTx,
+					state_TxData,state_TxData2, state_Done);
+signal Comm_State: State;
+
+signal counter: std_logic_vector(7 downto 0);
+signal setup_counter: std_logic_vector(27 downto 0);
+signal s1: std_logic;
+signal DATA_IN_SHIFT, DATA_OUT_SHIFT, DOUTBus, DATA_OUT_Tx,DATA_IN_S: std_logic_vector(127 downto 0);
+signal inBuffer,outBuffer: std_logic_vector(7 downto 0);
+signal CV_IN_SHIFT,CV_IN_S: std_logic_vector(255 downto 0);
+signal inputStream: std_logic_vector(383 downto 0);
+signal sentFlag,receiveFlag,sentAck,receiveAck,sendData,startAES: std_logic;
+signal five_led : std_logic:= '0';
+signal CLK_OUT2 : std_logic;
+signal locked: std_logic;
+signal reset_n : std_logic;
+signal CONTROL0: std_logic_vector(35 downto 0);
+signal Trig_0: std_logic_vector(14 downto 0);
+signal leds2_4: std_logic_vector(2 downto 0);
+begin
+
+Communication: Process(reset,clk)
+	begin
+		if(reset_n='1') then						
+			Comm_State<=state_check;
+			counter<=(others=>'0');
+			inputStream<=(others=>'0');
+			DATA_OUT_Tx<=(others=>'0');
+			sentAck<='0';
+			sendData<='0';
+			startAES<='0';
+			receiveAck<='0';
+			DATA_IN_S<=(others=>'0');
+			setup_counter<=(others=>'0');
+			
+		elsif(clk_out2'event and clk_out2='1') then
+			if(Comm_State=state_check) then
+				led_7 <= five_led;
+				if(getData='1' and receiveFlag='0') then
+					Comm_State<=state_StartRx;
+				elsif(receiveFlag='1') then
+					Comm_State<=state_operation;
+					receiveAck<='1';
+            elsif(btn = '1') then
+					Comm_State<=state_waitforaes;
+					setup_counter<=(others=>'0');
+				end if;
+			
+			elsif(Comm_State=state_StartRx) then
+			led_7 <= five_led;
+			if(receiveFlag='0') then
+					receiveAck<='0';
+					if(counter=10#48#) then
+						counter<=(others=>'0');
+						Comm_State<=state_check;
+					else
+						Comm_State<=state_RxData;
+					end if;
+				end if;
+			
+			elsif(Comm_State=state_RxData) then
+			led_7 <= five_led;
+				if(receiveFlag='1') then
+					inputStream<=inputStream(375 downto 0)&inBuffer;
+					receiveAck<='1';
+					counter<=counter+'1';	
+					Comm_State<=state_StartRx;
+				end if;
+				
+			elsif(Comm_State=state_waitforaes) then
+				setup_counter<=setup_counter+'1';
+				led_7 <= five_led;
+				 if(setup_counter=X"FFFFFFF") then	
+					Comm_State<=state_AES_Running;
+					DATA_IN_S<=inputStream(383 downto 256);
+					CV_IN_S<=inputStream(255 downto 0);
+				end if;
+				
+			elsif(Comm_State=state_AES_Running) then
+				if(five_led ='1') then
+				   led_7 <= five_led;
+					Comm_State<=state_TxReady;
+					counter<=(others=>'0');
+					DATA_OUT_SHIFT<=DOUTBus;
+				end if;
+			
+			elsif(Comm_State=state_TxReady) then
+				DATA_OUT_Tx<=DATA_OUT_SHIFT;
+				Comm_State<=state_StartTx;
+				
+				
+			elsif(Comm_State=state_StartTx) then	
+			   sendData<='1';								
+				Comm_State<=state_TxData;
+			
+			elsif(Comm_State=state_TxData) then
+				   if(sentFlag='1') then
+					Comm_State<=state_TxData2;
+					counter<=counter+'1';
+					sendData<='0';
+					sentAck<='1';
+				else
+					sendData<='1';
+				end if;
+			
+			elsif(Comm_State=state_TxData2) then
+				if(sentFlag='0') then
+					sentAck<='0';
+				      if(counter=10#16#) then
+						counter<=(others=>'0');
+						Comm_State<=state_Done;
+					else
+						Comm_State<=state_StartTx;
+						DATA_OUT_Tx<=DATA_OUT_Tx(119 downto 0)&X"00";
+					end if;
+				end if;
+			
+			elsif(Comm_State=state_Done) then
+					Comm_State<=state_check;
+			end if;			
+		end if;
+	end process;
+
+	DATA_IN_SHIFT<=inputStream(383 downto 256);
+	CV_IN_SHIFT<=inputStream(255 downto 0);
+--   led_7 <= five_led;
+	s1 <= sw1;
+	reset_n <= not LOCKED;
+	led2_4 <= leds2_4;
+	outBuffer<=DATA_OUT_Tx(127 downto 120);
+		
+		with SW select
+
+		dataStreamTo7Seg<=inputStream(383 downto 368) when "00000",
+								inputStream(367 downto 352) when "00001",
+								inputStream(351 downto 336) when "00010",
+								inputStream(335 downto 320) when "00011",
+								inputStream(319 downto 304) when "00100",
+								inputStream(303 downto 288) when "00101",
+								inputStream(287 downto 272) when "00110",
+								inputStream(271 downto 256) when "00111",
+								
+								inputStream(255 downto 240) when "01000",
+								inputStream(239 downto 224) when "01001",
+								inputStream(223 downto 208) when "01010",
+								inputStream(207 downto 192) when "01011",
+								inputStream(191 downto 176) when "01100",
+								inputStream(175 downto 160) when "01101",
+								inputStream(159 downto 144) when "01110",
+								inputStream(143 downto 128) when "01111",
+								inputStream(127 downto 112) when "10000",
+								inputStream(111 downto  96) when "10001",
+								inputStream( 95 downto  80) when "10010",
+								inputStream( 79 downto  64) when "10011",
+								inputStream( 63 downto  48) when "10100",
+								inputStream( 47 downto  32) when "10101",
+								inputStream( 31 downto  16) when "10110",
+								inputStream( 15 downto   0) when "10111",
+								
+								DATA_OUT_SHIFT (127 downto 112) when "11000",
+								DATA_OUT_SHIFT (111 downto  96) when "11001",
+								DATA_OUT_SHIFT ( 95 downto  80) when "11010",
+								DATA_OUT_SHIFT ( 79 downto  64) when "11011",
+								DATA_OUT_SHIFT ( 63 downto  48) when "11100",
+								DATA_OUT_SHIFT ( 47 downto  32) when "11101",
+								DATA_OUT_SHIFT ( 31 downto  16) when "11110",
+								DATA_OUT_SHIFT ( 15 downto   0) when OTHERS;
+with comm_State select
+ leds <= "0001" when State_Check,
+         "0010" when State_AES_Running,
+         "1000" when State_Done,
+         "0000" when OTHERS; 
+
+	TheUART: UARTTranceiver port map(clk=>clk_out2,reset=>reset_n, start=>sendData, dataParallelIn=>outBuffer, 
+						dataSerialOut=>serialDataOut, dataParallelOut=>inBuffer, dataSerialIn=>serialDataIn, 
+						sentFlag=>sentFlag, receiveFlag=>receiveFlag, sentAck=>sentAck, receiveAck=>receiveAck);
+						
+	AES: RIJNDAEL_TOP_ITER port map(clock => clk_out2, reset => reset_n, DATA_IN => DATA_IN_SHIFT, ENC_DEC_B => sw1, DATA_LOAD =>sw2,
+	CV_IN=>CV_IN_SHIFT,b1 => b1, b2 => b2, b3 => b3, leds => leds2_4, DATA_OUT => DOUTBus, DONE => five_led);
+	
+	The7Seg: SevenSegManager port map(clk=>clk_out2,reset=>reset_n,dig0=>dataStreamTo7Seg(15 downto 12),
+									 dig1=>dataStreamTo7Seg(11 downto  8),dig2=>dataStreamTo7Seg( 7 downto  4),
+									 dig3=>dataStreamTo7Seg( 3 downto  0),sevSeg=>sevSeg,anodeOut=>anodeOut);
+    dcm_clock : DCM
+  port map
+   (-- Clock in ports
+    CLK_IN1 => clk,
+    -- Clock out ports
+    CLK_OUT1 => CLK_OUT2,
+    -- Status and control signals
+    RESET  => RESET,
+    LOCKED => LOCKED);
+
+	 ICON_Core : ICON
+  port map (
+    CONTROL0 => CONTROL0);
+
+ILA_CORE : chipscope_ILA
+  port map (
+    CONTROL => CONTROL0,
+    CLK => CLK_OUT2,
+    TRIG0 => Trig_0);
+--Trig_0(0) <= sw2;
+--Trig_0(1) <= reset;
+--Trig_0(2) <= b1;
+--Trig_0(3) <= b2;
+--Trig_0(4) <= b3;
+
+Trig_0(0) <= five_led;
+
+Trig_0(14 downto 1) <= DOUTBus(127 downto 114);
+--with Comm_state select
+--Trig_0(9 downto 6) <=
+--"0000" when state_check,
+--"0001" when state_StartRx,
+--"0010" when state_RxData,
+--"0011" when state_waitforaes,
+--"0100" when state_AES_Running,
+--"0101" when state_TxReady,
+--"0110" when state_StartTx,
+--"0111" when state_TxData,
+--"1000" when state_TxData2,
+--"1001" when state_Done,
+--"1111" when others;
+--Trig_0(11 downto 10) <= counter(7 DOWNTO 6);
+end Behavioral;
