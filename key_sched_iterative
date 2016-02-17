@@ -1,0 +1,396 @@
+-- *************************************************************************
+-- DISCLAIMER. THIS SOFTWARE WAS WRITTEN BY EMPLOYEES OF THE U.S.
+-- GOVERNMENT AS A PART OF THEIR OFFICIAL DUTIES AND, THEREFORE, IS NOT
+-- PROTECTED BY COPYRIGHT. HOWEVER, THIS SOFTWARE CODIFIES THE FINALIST
+-- CANDIDATE ALGORITHMS (i.e., MARS, RC6tm, RIJNDAEL, SERPENT, AND
+-- TWOFISH) IN THE ADVANCED ENCRYPTION STANDARD (AES) DEVELOPMENT EFFORT
+-- SPONSORED BY THE NATIONAL INSTITUTE OF STANDARDS AND TECHNOLOGY (NIST)
+-- AND MAY BE PROTECTED BY ONE OR MORE FORMS OF INTELLECTUAL PROPERTY. THE
+-- U.S. GOVERNMENT MAKES NO WARRANTY, EITHER EXPRESSED OR IMPLIED,
+-- INCLUDING BUT NO LIMITED TO ANY IMPLIED WARRANTIES OF MERCHANTABILITY
+-- OR FITNESS FOR A PARTICULAR PURPOSE, REGARDING THIS SOFTWARE. THE U.S.
+-- GOVERNMENT FURTHER MAKES NO WARRANTY THAT THIS SOFTWARE WILL NOT
+-- INFRINGE ANY OTHER UNITED STATES OR FOREIGN PATENT OR OTHER
+-- INTELLECTUAL PROPERTY RIGHT. IN NO EVENT SHALL THE U.S. GOVERNMENT BE
+-- LIABLE TO ANYONE FOR COMPENSATORY, PUNITIVE, EXEMPLARY, SPECIAL,
+-- COLLATERAL, INCIDENTAL, CONSEQUENTIAL, OR ANY OTHER TYPE OF DAMAGES IN
+-- CONNECTION WITH OR ARISING OUT OF COPY OR USE OF THIS SOFTWARE.
+-- *************************************************************************
+
+-- ===========================================================================
+-- File Name : key_sched_iterative.vhdl
+-- Author    : NSA
+-- Date      : December 1999
+-- Project   : Rijndael iterative key schedule block 
+-- Purpose   : build key schedule for iterative implementation
+-- Notes     :
+-- ===========================================================================
+
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+use WORK.rijndael_pack.all;
+
+-- ===========================================================================
+-- =========================== Interface Description =========================
+-- ===========================================================================
+
+entity KEY_SCHEDULE_ITERATIVE is
+
+  port (clock        : in std_logic;    -- clock signal
+        reset        : in std_logic;    -- active high reset (asynch)
+
+        KS_LOADCV    : in std_logic;    -- load a new cryptovariable
+        KS_START     : in std_logic;    -- start a new expansion sequence
+        KS_CV        : in SLV_256;      -- cryptovariable input bus
+--        KS_CV_SIZE   : in SLV_2;        -- cryptovariable size
+        KS_ENC       : in std_logic;    -- encrypt select (1=enc, 0=dec)
+
+        KS_ROUND_KEY : out KEY_TYPE     -- output round key (Ki)
+
+  );
+
+end KEY_SCHEDULE_ITERATIVE;
+
+architecture KEY_SCHEDULE_ITERATIVE_RTL of KEY_SCHEDULE_ITERATIVE is
+
+type RUNUP_STATE_TYPE is  ( HOLD, CV_RUNUP, CV_EXPAND, DONE );
+
+
+-- ===========================================================================
+-- =========================== Signal Definition =============================
+-- ===========================================================================
+
+signal CV_RUNUP_STEP : integer range 0 to 255;
+signal RUNUP_STATE   : RUNUP_STATE_TYPE;
+signal W             : W_TYPE;
+signal W_START       : W_TYPE;
+--signal CV_MAPPED128  : W_TYPE;
+--signal CV_MAPPED192  : W_TYPE;
+signal CV_MAPPED256  : W_TYPE;
+
+
+begin
+
+
+-- ===========================================================================
+-- Map Initial CV to to W registers
+-- ===========================================================================
+
+--G0a: for i in -4 to -1 generate
+
+  -- CV_MAPPED128(i) <= KS_CV(255 - (i + 4) * 32 downto 224 - (i + 4) * 32);
+
+--end generate; -- G0a
+
+--G0b: for i in -6 to -1 generate
+
+  -- CV_MAPPED192(i) <= KS_CV(255 - (i + 6) * 32 downto 224 - (i + 6) * 32);
+
+--end generate; -- G0b
+
+G0c: for i in -8 to -1 generate
+
+   CV_MAPPED256(i) <= KS_CV(255 - (i + 8) * 32 downto 224 - (i + 8) * 32);
+
+end generate; -- G0c
+
+
+-- ===========================================================================
+-- Map W registers to output roundkeys
+-- ===========================================================================
+
+G1: for column in 0 to 3 generate
+   G1a: for row in 0 to 3 generate
+
+       KS_ROUND_KEY(row)(column) <=
+
+          --CV_MAPPED128(-4+column)(31-row*8 downto 24-row*8)            when
+          --KS_CV_SIZE = CV128 and ( KS_LOADCV = '1' or KS_START = '1' ) else
+
+          --CV_MAPPED192(-6+column)(31-row*8 downto 24-row*8)            when
+          --KS_CV_SIZE = CV192 and (KS_LOADCV = '1' or KS_START = '1' )  else
+
+          CV_MAPPED256(-8+column)(31-row*8 downto 24-row*8)            when
+          (KS_LOADCV = '1' or KS_START = '1' )  else
+
+          --W(-4+column)(31-row*8 downto 24-row*8) when
+          --KS_CV_SIZE = CV128 and KS_ENC = '1'    else
+
+          --W(-6+column)(31-row*8 downto 24-row*8) when
+          --KS_CV_SIZE = CV192 and KS_ENC = '1'    else
+
+          W(-8+column)(31-row*8 downto 24-row*8) when
+          KS_ENC = '1'    else
+
+          --W(-4+(3-column))(31-row*8 downto 24-row*8) when
+          --KS_CV_SIZE = CV128  and KS_ENC = '0'       else
+
+          --W(-6+(3-column))(31-row*8 downto 24-row*8) when
+          --KS_CV_SIZE = CV192  and KS_ENC = '0'       else
+
+          W(-8+(3-column))(31-row*8 downto 24-row*8);
+
+   end generate; -- G1a
+end generate; --G1
+
+-- ===========================================================================
+-- =========================== Data Movement =================================
+-- ===========================================================================
+
+DATA_FLOW : process( clock, reset )
+
+variable w_temp : W_TYPE;
+variable ksr_enc : std_logic;
+variable ksr_round : SLV_16;
+variable ksr_in1   : W_TYPE;
+variable ksr_output : W_TYPE;
+
+begin
+
+   if reset = '1' then
+
+      for i in -8 to -1 loop
+         w(i) <= ( others => '0' );
+      end loop;
+
+   elsif clock'event and clock = '1' then
+
+      case RUNUP_STATE is
+         when HOLD | DONE =>
+            ksr_enc   := KS_ENC;
+            ksr_round := std_logic_vector(TO_UNSIGNED(CV_RUNUP_STEP,16));
+                  ksr_in1   := CV_MAPPED256;
+            
+
+         when CV_RUNUP =>
+            ksr_enc := '1';
+            ksr_round := std_logic_vector(TO_UNSIGNED(CV_RUNUP_STEP,16));
+            ksr_in1   := W;
+
+         when others =>
+            ksr_enc := KS_ENC;
+            if KS_ENC = '1' then
+               ksr_round := std_logic_vector(TO_UNSIGNED(CV_RUNUP_STEP+1,16));
+            else
+               ksr_round := std_logic_vector(TO_UNSIGNED(CV_RUNUP_STEP,16));
+            end if;
+            ksr_in1 := W;
+
+      end case;
+
+      ksr_output := KS_ROUND_FUNCT(ksr_enc, ksr_round, ksr_in1 );
+
+      case RUNUP_STATE is
+
+         when HOLD | DONE =>
+
+            if (( KS_LOADCV = '1' and KS_ENC = '0' )   or
+                ( KS_START  = '1' and KS_ENC = '1' ) ) then
+
+               for i in -8 to -1 loop
+                  if KS_ENC = '0' then
+                     --case KS_CV_SIZE is
+                        --when CV128 =>
+                          -- if i < -4 then
+                            --  W(i) <= ( others => '0' );
+                           --else
+                             -- W(i) <= KS_CV(255-(i+4)*32 downto 224-(i+4)*32);
+                           --end if;
+
+                        --when CV192 =>
+                          -- if i < -6 then
+                            --  W(i) <= ( others => '0' );
+                           --else
+                             -- W(i) <= KS_CV(255-(i+6)*32 downto 224-(i+6)*32);
+                           --end if;
+
+                        --when others =>
+                           W(i) <= KS_CV(255-(i+8)*32 downto 224-(i+8)*32);
+
+                     --end case;
+
+                  else
+
+                      W <= ksr_output;
+
+                  end if; -- i < -START
+
+               end loop; -- for i in -8 to -1
+
+            elsif  KS_START = '1' and KS_ENC = '0' then
+
+               W <= W_START;
+
+            end if;
+
+         when CV_RUNUP =>   -- always force KS_ENC to encrypt for runup
+            w_temp := ksr_output;
+
+            if (KS_ENC = '0') and (
+               --(CV_RUNUP_STEP = LAST_DCVRUNUP_128 and KS_CV_SIZE = CV128) or
+               --(CV_RUNUP_STEP = LAST_DCVRUNUP_192 and KS_CV_SIZE = CV192) or
+               (CV_RUNUP_STEP = LAST_DCVRUNUP_256) ) then
+
+               --case KS_CV_SIZE is
+
+                 -- when CV128 =>
+
+                   -- for i in 0 to 3 loop
+                     --  W(-1-i) <= w_temp(i-4);
+                       --W_START(-1-i) <= w_temp(i-4);
+                    --end loop;
+
+                  --when CV192 =>
+
+                     --for i in 0 to 5 loop
+                       -- W(-3-i) <= w_temp(i-6);
+                        --W_START(-3-i) <= w_temp(i-6);
+                     --end loop;
+
+                     --W(-2)       <= W(-3);
+                     --W(-1)       <= W(-4);
+                     --W_START(-2) <= W(-3);
+                     --W_START(-1) <= W(-4);
+
+                  --when others =>
+
+                     for i in 0 to 7 loop
+                        W(-1-i)       <= W(i-8);
+                        W_START(-1-i) <= W(i-8);
+                     end loop;
+ 
+               --end case;
+
+            else
+
+                W <= w_temp;
+
+            end if;
+
+
+         when others =>
+               W <= ksr_output;
+
+      end case;
+
+   end if;
+
+end process; -- DATA_FLOW
+
+-- ===========================================================================
+-- =========================== State Machine / Controller ====================
+-- ===========================================================================
+
+RUNUP_FLOW: process( clock, reset )
+
+begin
+
+   if reset = '1' then
+
+      CV_RUNUP_STEP <= 0;
+      RUNUP_STATE   <= HOLD;
+
+   elsif clock'event and clock = '1' then
+
+      case RUNUP_STATE is
+
+         when HOLD =>
+
+            if KS_ENC = '1' then
+               if KS_START = '1' then
+                  RUNUP_STATE <= CV_EXPAND;
+               else
+                  RUNUP_STATE <= HOLD;
+               end if;
+
+            else
+
+               if KS_LOADCV = '1' then
+                  RUNUP_STATE <= CV_RUNUP;
+               elsif KS_START = '1' then
+                  RUNUP_STATE <= CV_EXPAND;
+               else
+                  RUNUP_STATE <= HOLD;
+               end if;
+
+            end if;
+
+            CV_RUNUP_STEP <= 0;
+
+         when CV_RUNUP =>
+
+            if ( CV_RUNUP_STEP /= LAST_ECVRUNUP_STEP and KS_ENC = '1') or
+
+               --( CV_RUNUP_STEP /= LAST_DCVRUNUP_128 and
+                 --KS_ENC = '0' and KS_CV_SIZE = CV128 ) or
+
+               --( CV_RUNUP_STEP /= LAST_DCVRUNUP_192 and
+                 --KS_ENC = '0' and KS_CV_SIZE = CV192 ) or
+
+               ( CV_RUNUP_STEP /= LAST_DCVRUNUP_256 and
+                 KS_ENC = '0') then
+
+               CV_RUNUP_STEP <= CV_RUNUP_STEP + 1;     -- increment counter
+               RUNUP_STATE   <= RUNUP_STATE;
+
+            else                                  -- disable cvrunup controller
+
+               RUNUP_STATE   <= DONE;
+               CV_RUNUP_STEP <= 0;
+
+            end if;
+
+         when CV_EXPAND =>
+
+            if --( CV_RUNUP_STEP /= LAST_DCVRUNUP_128 and KS_CV_SIZE = CV128 ) or
+
+               --( CV_RUNUP_STEP /= LAST_DCVRUNUP_192-1 and
+                 --KS_CV_SIZE = CV192 and KS_ENC = '1') or
+
+               --( CV_RUNUP_STEP /= LAST_DCVRUNUP_192 and
+                 --KS_CV_SIZE = CV192 and KS_ENC = '0' ) or
+
+               (CV_RUNUP_STEP /= LAST_DCVRUNUP_256) then
+
+               CV_RUNUP_STEP <= CV_RUNUP_STEP + 1;     -- increment counter
+               RUNUP_STATE   <= RUNUP_STATE;
+
+            else                              -- disable cvrunup controller
+
+               RUNUP_STATE   <= DONE;
+               CV_RUNUP_STEP <= 0;
+
+            end if;
+
+         when DONE =>
+
+            if KS_ENC = '1' then
+
+               if KS_START = '1' then
+                  RUNUP_STATE <= CV_EXPAND;
+               else
+                  RUNUP_STATE <= DONE;
+               end if;
+
+            else
+
+               if KS_LOADCV = '1' then
+                  RUNUP_STATE <= CV_RUNUP;
+               elsif KS_START = '1' then
+                  RUNUP_STATE <= CV_EXPAND;
+               else
+                  RUNUP_STATE <= DONE;
+               end if;
+
+            end if;
+
+            CV_RUNUP_STEP <= 0;
+
+      end case;
+                                             
+   end if;  -- reset = '1'
+
+end process; -- RUNUP_FLOW
+
+end KEY_SCHEDULE_ITERATIVE_RTL;
