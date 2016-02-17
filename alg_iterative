@@ -1,0 +1,247 @@
+-- *************************************************************************
+-- DISCLAIMER. THIS SOFTWARE WAS WRITTEN BY EMPLOYEES OF THE U.S.
+-- GOVERNMENT AS A PART OF THEIR OFFICIAL DUTIES AND, THEREFORE, IS NOT
+-- PROTECTED BY COPYRIGHT. HOWEVER, THIS SOFTWARE CODIFIES THE FINALIST
+-- CANDIDATE ALGORITHMS (i.e., MARS, RC6tm, RIJNDAEL, SERPENT, AND
+-- TWOFISH) IN THE ADVANCED ENCRYPTION STANDARD (AES) DEVELOPMENT EFFORT
+-- SPONSORED BY THE NATIONAL INSTITUTE OF STANDARDS AND TECHNOLOGY (NIST)
+-- AND MAY BE PROTECTED BY ONE OR MORE FORMS OF INTELLECTUAL PROPERTY. THE
+-- U.S. GOVERNMENT MAKES NO WARRANTY, EITHER EXPRESSED OR IMPLIED,
+-- INCLUDING BUT NO LIMITED TO ANY IMPLIED WARRANTIES OF MERCHANTABILITY
+-- OR FITNESS FOR A PARTICULAR PURPOSE, REGARDING THIS SOFTWARE. THE U.S.
+-- GOVERNMENT FURTHER MAKES NO WARRANTY THAT THIS SOFTWARE WILL NOT
+-- INFRINGE ANY OTHER UNITED STATES OR FOREIGN PATENT OR OTHER
+-- INTELLECTUAL PROPERTY RIGHT. IN NO EVENT SHALL THE U.S. GOVERNMENT BE
+-- LIABLE TO ANYONE FOR COMPENSATORY, PUNITIVE, EXEMPLARY, SPECIAL,
+-- COLLATERAL, INCIDENTAL, CONSEQUENTIAL, OR ANY OTHER TYPE OF DAMAGES IN
+-- CONNECTION WITH OR ARISING OUT OF COPY OR USE OF THIS SOFTWARE.
+-- *************************************************************************
+
+-- ===========================================================================
+-- File Name : alg_iterative.vhdl
+-- Author    : NSA
+-- Date      : December 99
+-- Project   : AES Candidate Evaluation
+-- Purpose   : This block implements the Rijndael algorithm
+--             for an iterative case
+-- Notes     :
+-- ===========================================================================
+
+library ieee;
+use ieee.std_logic_1164.all;
+use WORK.rijndael_pack.all;
+
+-- ===========================================================================
+-- =========================== Interface Description =========================
+-- ===========================================================================
+
+entity ALG_ITERATIVE is
+
+  port (clock       : in STD_LOGIC;
+        reset       : in STD_LOGIC;
+
+        ALG_DATAIN  : in SLV_128;         -- input data (plaintext/ciphertex)
+        ALG_KEY     : in KEY_TYPE;        -- encrypt/decrypt subkey
+        ALG_START   : in STD_LOGIC;       -- indicates start of algorithm
+        ALG_ENC     : in STD_LOGIC;       -- enc = '1', dec = '1'
+        --ALG_CVSIZE  : in SLV_2;           -- 128, 192, or 256 bit keys
+
+        ALG_DATAOUT : out SLV_128;        -- output data (ciphertext/plaintext)
+        ALG_DONE    : out STD_LOGIC       -- indicates end of algorithm
+  );
+
+end ALG_ITERATIVE;
+
+architecture ALG_ITERATIVE_RTL of ALG_ITERATIVE is
+
+
+-- ===========================================================================
+-- =========================== Constant Definition ===========================
+-- ===========================================================================
+
+constant HOLD : integer := 0;         -- Hold state for controller
+
+-- ===========================================================================
+-- =========================== Signal Definition =============================
+-- ===========================================================================
+
+signal ROUND        : ROUND_TYPE;         -- round counter
+signal ALG_DATA     : STATE_TYPE;         -- round output
+signal CTRL_STATE   : CONTROL_STATES;     -- current state of controller
+signal ALG_DATA_MAP : STATE_TYPE;         -- formatted input
+signal ALG_DONE_INT : std_logic;          -- internal 'done' signal
+
+signal ALL_ZEROS    : SLV_8;              -- grounded signal
+
+begin
+
+-- ===========================================================================
+--  Map SLV_128 to the STATE_TYPE format
+-- ===========================================================================
+
+G1: for column in 0 to 3 generate
+
+   G1a: for row in 0 to 3 generate
+
+      ALG_DATA_MAP(row)(column) <= ALG_DATAIN( 127-(column*32+row*8) downto 
+                                               128-(column*32+(row+1)*8) );
+   end generate; -- G1a
+
+end generate; -- G1
+
+-- ===========================================================================
+-- =========================== Data Movement =================================
+-- ===========================================================================
+
+
+DATA_FLOW : process( clock, reset )
+
+variable temp_state : STATE_TYPE;
+
+begin
+
+   if reset = '1' then
+
+      for row in 0 to 3 loop
+         for column in 0 to 3 loop
+            ALG_DATA(row)(column) <= ( others => '0' );
+         end loop;
+      end loop;
+
+      ALG_DONE_INT <= '0';
+
+   elsif clock'event and clock = '1' then
+
+      case CTRL_STATE is
+
+         when nop =>
+
+            if ALG_START = '1' then
+
+               if ALG_ENC = '1' then
+                  ADD_ROUNDKEY( ALG_DATA_MAP, ALG_KEY, ALG_DATA );
+               else
+                  temp_state := ADD_ROUNDKEY_FUNCT ( ALG_KEY, ALG_DATA_MAP );
+                  temp_state := INV_BYTE_SUB_FUNCT ( temp_state );
+                  ALG_DATA   <= INV_SHIFT_ROW_FUNCT ( temp_state );
+
+               end if;
+
+            end if;
+
+            ALG_DONE_INT <= '0';     -- indicate algorithm not complete
+
+         when others =>
+
+            if ALG_ENC = '1' then
+
+               if ( --( ALG_CVSIZE = CV128 and ROUND < 10 ) or
+                    --( ALG_CVSIZE = CV192 and ROUND < 12 ) or
+                    ROUND < 14 ) then
+
+                    temp_state := BYTE_SUB_FUNCT ( ALG_DATA );
+                    temp_state := SHIFT_ROW_FUNCT ( temp_state );
+                    temp_state := MIX_COLUMN_FUNCT ( temp_state );
+                    ALG_DATA   <= ADD_ROUNDKEY_FUNCT (  ALG_KEY, temp_state );
+
+                    ALG_DONE_INT <= '0';    -- indicate algorithm not complete
+
+               else
+
+                    temp_state := BYTE_SUB_FUNCT ( ALG_DATA );
+                    temp_state := SHIFT_ROW_FUNCT ( temp_state );
+                    ALG_DATA   <= ADD_ROUNDKEY_FUNCT ( ALG_KEY, temp_state );
+
+                    ALG_DONE_INT <= '1';    -- indicate algorithm complete
+
+               end if;
+
+            else
+
+               if ( --( ALG_CVSIZE = CV128 and ROUND <=  9 ) or
+                    --( ALG_CVSIZE = CV192 and ROUND <= 11 ) or
+                    ROUND <= 13) then
+
+                  temp_state := ADD_ROUNDKEY_FUNCT ( ALG_KEY, ALG_DATA );
+                  temp_state := INV_MIX_COLUMN_FUNCT ( temp_state );
+                  temp_state := INV_BYTE_SUB_FUNCT ( temp_state );
+                  ALG_DATA   <= INV_SHIFT_ROW_FUNCT ( temp_state );
+
+                  ALG_DONE_INT <= '0';    -- indicate algorithm not complete
+
+               else                       -- Perform Post-add
+
+                  ALG_DATA <= ADD_ROUNDKEY_FUNCT ( ALG_KEY, ALG_DATA );
+
+                  ALG_DONE_INT <= '1';    -- indicate algorithm complete
+
+               end if;
+
+            end if; -- ALG_ENC = '1'
+
+      end case;
+
+   end if; -- reset
+
+end process; -- DATA_FLOW
+
+
+-- ===========================================================================
+-- =========================== State Machine / Controller ====================
+-- ===========================================================================
+
+STATE_FLOW : process( clock, reset )
+
+begin
+
+   if reset = '1' then
+
+      ROUND      <= HOLD;          -- put controller in hold state
+      CTRL_STATE <= nop;           -- disable controller
+
+   elsif clock'event and clock = '1' then
+
+      -- check for inactive and completion of algorithm
+      if ((ALG_START = '1' or CTRL_STATE = busy) and 
+         --(ROUND /= 10 and ALG_CVSIZE = CV128) or
+         --(ROUND /= 12 and ALG_CVSIZE = CV192) or
+         (ROUND /= 14)) then
+
+         CTRL_STATE <= busy;       -- enable controller
+         ROUND      <= ROUND + 1;  -- active, so increment counter
+
+      else
+
+         CTRL_STATE <= nop;        -- disable controller
+         ROUND      <= HOLD;       -- reset counter
+
+      end if;
+
+   end if; -- reset
+
+end process; -- STATE_FLOW
+
+
+ALG_DONE <= ALG_DONE_INT;
+
+-- ===========================================================================
+--  Map STATE_TYPE to the SLV_128 format
+-- ===========================================================================
+
+ALL_ZEROS <= ( others => '0' );
+
+G2: for column in 0 to 3 generate
+
+  G2a: for row in 0 to 3 generate
+
+     ALG_DATAOUT((127-(column*32+row*8)) downto 
+                 (128-(column*32+(row+1)*8))) <=
+                                 ALG_DATA(row)(column) when ALG_DONE_INT = '1'
+                                 else ALL_ZEROS;
+
+  end generate; -- G2a
+
+end generate; -- G2
+
+
+end ALG_ITERATIVE_RTL;
